@@ -36,7 +36,10 @@ def eject_drive(drive_letter: str):
 
         handle.Close()
         print(f"Drive {drive_letter} ejected.")
-        winsound.PlaySound(r"C:\Windows\Media\Windows Print complete.wav", winsound.SND_FILENAME)
+        try:
+            winsound.PlaySound(r"C:\Windows\Media\Windows Print complete.wav", winsound.SND_FILENAME)
+        except RuntimeError as e:
+            log(f"Failed to play success sound (non-fatal): {e}")
 
         # ntfy
         try:
@@ -48,8 +51,11 @@ def eject_drive(drive_letter: str):
 
     except pywintypes.error as e:
         print("Failed:", e)
-        winsound.PlaySound(r"C:\Windows\Media\Windows Critical Stop.wav", winsound.SND_FILENAME)
-        
+        try:
+            winsound.PlaySound(r"C:\Windows\Media\Windows Critical Stop.wav", winsound.SND_FILENAME)
+        except RuntimeError as sound_e:
+            log(f"Failed to play failure sound (non-fatal): {sound_e}")
+
         try:
             requests.post("https://ntfy.sh/jowfuf-quPtid-suwza5",
                 data=f"Failed to eject drive {drive_letter} 😞".encode(encoding='utf-8'),
