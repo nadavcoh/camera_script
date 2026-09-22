@@ -67,6 +67,31 @@ def log(msg):
     """Print message with timestamp."""
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
 
+def get_capture_dt(file_path: Path) -> datetime:
+    """Return the file's capture time: EXIF DateTimeOriginal if available,
+    otherwise fall back to the file's own mtime (logging a warning)."""
+    try:
+        result = subprocess.run(
+            ["exiftool", "-s", "-s", "-s", "-DateTimeOriginal", str(file_path)],
+            capture_output=True,
+            text=True,
+        )
+        ts = result.stdout.strip()
+        if ts:
+            return datetime.strptime(ts, "%Y:%m:%d %H:%M:%S")
+    except Exception as e:
+        log(f"exiftool timestamp read failed for {file_path.name}: {e}")
+
+    log(f"WARNING: no EXIF DateTimeOriginal for {file_path.name}, falling back to file mtime")
+    return datetime.fromtimestamp(file_path.stat().st_mtime)
+
+def canonical_name(file_path: Path) -> str:
+    """Prefix the filename with its capture timestamp so a reused camera
+    filename (e.g. after swapping/resetting an SD card) can never collide
+    with an unrelated, previously-imported photo of the same name."""
+    dt = get_capture_dt(file_path)
+    return f"{dt.strftime('%Y%m%d_%H%M%S')}_{file_path.name}"
+
 camera_icon = "📷"
 flash_icon = "✨"
 
@@ -112,23 +137,41 @@ for p in [inbox_path, upload_path, done_path]:
     p.mkdir(parents=True, exist_ok=True)
     log(f"Ensured directory exists: {p}")
 
-# Step 1 & 2: Compare filenames and copy missing files to inbox
+# Step 1 & 2: Identify files already imported (by capture time, not filename
+# alone -- a swapped/reset SD card can reuse old filenames for brand new
+# photos) and copy the genuinely new ones to inbox, renamed to be collision-proof.
 camera_files = {f.name: f for f in camera_path.iterdir() if f.is_file()}
-original_files = {f.name for f in originals_path.iterdir() if f.is_file()}
+
+original_mtimes = {}
+for f in originals_path.iterdir():
+    if f.is_file():
+        original_mtimes.setdefault(round(f.stat().st_mtime), []).append(f.name)
 
 log(f"Found {len(camera_files)} files on camera.")
-log(f"Found {len(original_files)} files in originals.")
+log(f"Found {sum(len(v) for v in original_mtimes.values())} files in originals.")
 
 new_files = []
 
 for fname, fpath in camera_files.items():
-    if fname not in original_files:
-        dest_inbox = inbox_path / fname
-        shutil.copy2(fpath, dest_inbox)
-        dest_original = originals_path / fname
-        shutil.copy2(fpath, dest_original)
-        new_files.append(dest_inbox)
-        log(f"Copied to inbox and originals: {fname} {camera_icon}")
+    file_mtime = round(fpath.stat().st_mtime)
+    if file_mtime in original_mtimes:
+        # Same capture time as something already imported -> genuine duplicate,
+        # regardless of what it's named this time around.
+        continue
+
+    canon = canonical_name(fpath)
+    dest_inbox = inbox_path / canon
+    dest_original = originals_path / canon
+    if dest_original.exists():
+        # Shouldn't happen (the mtime check above already ruled out a dup),
+        # but never silently overwrite an existing original.
+        log(f"WARNING: {canon} already exists in originals despite mtime check; skipping to avoid overwrite")
+        continue
+
+    shutil.copy2(fpath, dest_inbox)
+    shutil.copy2(fpath, dest_original)
+    new_files.append(dest_inbox)
+    log(f"Copied to inbox and originals: {fname} -> {canon} {camera_icon}")
 
 # Sefely remove camera
 log("Safely removing camera...")
