@@ -1,7 +1,7 @@
 import shutil
 import subprocess
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 import sys
 import time
 import win32file
@@ -10,6 +10,8 @@ import pywintypes
 import winsound
 import requests
 from zoneinfo import ZoneInfo
+
+TZ = ZoneInfo("Asia/Jerusalem")
 
 def eject_drive(drive_letter: str):
     volume_path = f"\\\\.\\{drive_letter}"
@@ -91,6 +93,14 @@ def canonical_name(file_path: Path) -> str:
     with an unrelated, previously-imported photo of the same name."""
     dt = get_capture_dt(file_path)
     return f"{dt.strftime('%Y%m%d_%H%M%S')}_{file_path.name}"
+
+def capture_dt_from_canonical_name(canonical_path: Path) -> datetime:
+    """Recover the capture datetime already encoded in a canonical filename
+    (e.g. '20260922_212536_SUNP0290.AVI'), so downstream steps stay
+    consistent with the timestamp already baked into the filename instead
+    of re-deriving it (and potentially disagreeing)."""
+    date_part, time_part, _ = canonical_path.name.split("_", 2)
+    return datetime.strptime(f"{date_part}_{time_part}", "%Y%m%d_%H%M%S")
 
 camera_icon = "📷"
 flash_icon = "✨"
@@ -189,12 +199,49 @@ else:
     total_files = len(new_files)
     log(f"{total_files} new files to process.")
 
+    # Step 3: Convert AVI videos to MP4 with the real capture time embedded.
+    # Google Photos reads a video's "date taken" from the MP4/MOV creation_time
+    # metadata; AVI files from this camera carry no metadata Google recognizes,
+    # so uncoverted AVI uploads always get dated "today". The pristine AVI
+    # stays archived untouched in `originals` -- only the inbox copy that
+    # actually gets uploaded is converted.
+    avi_files = [f for f in new_files if f.suffix.upper() == ".AVI"]
+    if avi_files:
+        log(f"Converting {len(avi_files)} AVI video(s) to MP4 with correct capture-time metadata...")
+        for avi_path in avi_files:
+            dt_local = capture_dt_from_canonical_name(avi_path).replace(tzinfo=TZ)
+            creation_time = dt_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            mp4_path = avi_path.with_suffix(".mp4")
+
+            def run_ffmpeg(extra_args):
+                return subprocess.run(
+                    ["ffmpeg", "-y", "-i", str(avi_path), *extra_args,
+                     "-metadata", f"creation_time={creation_time}", str(mp4_path)],
+                    capture_output=True, text=True,
+                )
+
+            try:
+                # Try a fast lossless remux first.
+                result = run_ffmpeg(["-c", "copy"])
+                if result.returncode != 0:
+                    log(f"ffmpeg remux failed for {avi_path.name}, retrying with re-encode: {result.stderr.strip()[-300:]}")
+                    result = run_ffmpeg(["-c:v", "libx264", "-c:a", "aac"])
+
+                if result.returncode == 0 and mp4_path.exists():
+                    avi_path.unlink()
+                    new_files[new_files.index(avi_path)] = mp4_path
+                    log(f"Converted {avi_path.name} -> {mp4_path.name} (creation_time={creation_time}) {camera_icon}")
+                else:
+                    log(f"ffmpeg conversion failed for {avi_path.name} (exit {result.returncode}): {result.stderr.strip()[-300:]}")
+                    log(f"Uploading {avi_path.name} as-is; its date in Google Photos will show the upload time.")
+            except FileNotFoundError:
+                log(f"ffmpeg not found on PATH; skipping conversion for {avi_path.name}. Its date in Google Photos will show the upload time.")
+                break
+
     # Step 4: ExifTool GPS removal (verbose)
     jpg_files = [str(f) for f in inbox_path.glob("*.JPG")]
     if jpg_files:
         log("Running ExifTool to remove GPS data (verbose)...")
-        
-        TZ = ZoneInfo("Asia/Jerusalem")
 
         for file in jpg_files:
             # Read DateTimeOriginal
