@@ -1,7 +1,7 @@
 import shutil
 import subprocess
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime
 import sys
 import time
 import win32file
@@ -209,7 +209,6 @@ else:
     if avi_files:
         log(f"Converting {len(avi_files)} AVI video(s) to MP4 with correct capture-time metadata...")
         for avi_path in avi_files:
-<<<<<<< HEAD
             # Google Photos displays a video's creation_time verbatim as
             # local wall-clock time -- it does NOT convert UTC to the
             # viewer's timezone the way it does for photos (which carry an
@@ -222,10 +221,6 @@ else:
             # never converted it back).
             dt_local = capture_dt_from_canonical_name(avi_path)
             creation_time = dt_local.strftime("%Y-%m-%dT%H:%M:%SZ")
-=======
-            dt_local = capture_dt_from_canonical_name(avi_path).replace(tzinfo=TZ)
-            creation_time = dt_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
->>>>>>> 6e2e88a30fa62925e1cadbcaa8822cecfeb1395f
             mp4_path = avi_path.with_suffix(".mp4")
 
             def run_ffmpeg(extra_args):
@@ -246,7 +241,6 @@ else:
                     avi_path.unlink()
                     new_files[new_files.index(avi_path)] = mp4_path
                     log(f"Converted {avi_path.name} -> {mp4_path.name} (creation_time={creation_time}) {camera_icon}")
-<<<<<<< HEAD
 
                     # Experimental: additionally write the Apple-style
                     # Keys:CreationDate tag (local time with an explicit
@@ -269,8 +263,6 @@ else:
                     )
                     if tag_result.returncode != 0:
                         log(f"WARNING: could not set experimental Keys:CreationDate on {mp4_path.name} (non-fatal): {tag_result.stderr.strip()[-300:]}")
-=======
->>>>>>> 6e2e88a30fa62925e1cadbcaa8822cecfeb1395f
                 else:
                     log(f"ffmpeg conversion failed for {avi_path.name} (exit {result.returncode}): {result.stderr.strip()[-300:]}")
                     log(f"Uploading {avi_path.name} as-is; its date in Google Photos will show the upload time.")

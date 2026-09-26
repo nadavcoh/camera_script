@@ -21,7 +21,6 @@ when the camera is plugged in.
    `creation_time` embedded, because Google Photos reads a video's "date
    taken" from MP4/MOV container metadata and this camera's AVI files don't
    carry anything it recognizes — uploaded as-is, they'd all show today's
-<<<<<<< HEAD
    date instead of when they were shot. It also writes an experimental
    `Keys:CreationDate` tag (local time + explicit offset, the same way
    iPhone videos encode it) as a low-risk attempt to also get the
@@ -29,9 +28,6 @@ when the camera is plugged in.
    unproven; the `creation_time` fix is what actually guarantees the
    correct displayed time regardless of whether the experiment does
    anything.
-=======
-   date instead of when they were shot.
->>>>>>> 6e2e88a30fa62925e1cadbcaa8822cecfeb1395f
 4. **Eject the camera** safely (Windows volume lock/dismount/eject).
 5. **Strip GPS data** from JPEGs and set the correct UTC offset tags
    (`exiftool`), so timestamps display correctly without leaking location.
