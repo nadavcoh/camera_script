@@ -38,6 +38,7 @@ Google's `lsjson` returns `Size: -1` for existing library items, so rclone's
 the embedded video `creation_time` and the filename from ever disagreeing
 if the two were computed at different points in a future refactor.
 
+<<<<<<< HEAD
 **`creation_time` is written as literal local wall-clock time, not UTC —
 this is deliberate, not a bug.** The MP4 spec says `creation_time` should
 be UTC, but Google Photos displays it verbatim with no timezone conversion
@@ -74,6 +75,11 @@ reverse-engineered from ExifTool's source, but not writable by any
 available tool without hand-authoring raw MP4 `moov/meta/keys` boxes —
 not attempted given the corruption risk and uncertain payoff).
 
+=======
+**Never overwrite `originals`.** Every write path checks
+`dest_original.exists()` first. The permanent archive must stay append-only.
+
+>>>>>>> 6e2e88a30fa62925e1cadbcaa8822cecfeb1395f
 ## Known-fragile areas / things to verify before "fixing"
 
 - **`winsound.PlaySound` failing under Task Scheduler** is not a bug to
