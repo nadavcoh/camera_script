@@ -1,3 +1,5 @@
+import argparse
+import secrets
 import shutil
 import subprocess
 from pathlib import Path
@@ -93,6 +95,27 @@ def notify(message: str, retries: int = 3) -> bool:
                 time.sleep(2 * attempt)
     return False
 
+def generate_ntfy_topic(force: bool = False) -> int:
+    """Create a hard-to-guess ntfy topic and save it to ntfy_topic.txt.
+    Refuses to replace an existing topic unless force is set, since that would
+    silently orphan the subscription in the ntfy app. Returns an exit code."""
+    if not force:
+        try:
+            existing = NTFY_TOPIC_FILE.read_text(encoding="utf-8-sig").strip()
+        except OSError:
+            existing = ""
+        if existing:
+            print(f"{NTFY_TOPIC_FILE} already contains a topic. Re-run with --force to replace it.")
+            return 1
+    # 18 random bytes = 144 bits of entropy; token_urlsafe only emits
+    # A-Z a-z 0-9 - _, all valid in an ntfy topic name.
+    topic = "camera-" + secrets.token_urlsafe(18)
+    NTFY_TOPIC_FILE.write_text(topic + "\n", encoding="utf-8")
+    print(f"Saved new topic to {NTFY_TOPIC_FILE}")
+    print(f"Topic: {topic}")
+    print(f"Subscribe in the ntfy app (or open https://ntfy.sh/{topic}) to receive notifications.")
+    return 0
+
 def fat_wall_clock(mtime: float) -> datetime:
     """Recover the true local wall-clock time from the mtime of a file on the
     camera's FAT card.
@@ -168,6 +191,15 @@ ascii_banner = r"""
 :______________________________\\|/____________________________:;
        AUTOMATIC PHOTO IMPORT & UPLOAD
 """
+parser = argparse.ArgumentParser(description="Automatic camera photo import & upload.")
+parser.add_argument("--generate-topic", action="store_true",
+                    help="Generate a random ntfy topic, save it to ntfy_topic.txt, and exit.")
+parser.add_argument("--force", action="store_true",
+                    help="With --generate-topic: replace an existing topic.")
+args = parser.parse_args()
+if args.generate_topic:
+    sys.exit(generate_ntfy_topic(args.force))
+
 print(ascii_banner)
 
 # Paths

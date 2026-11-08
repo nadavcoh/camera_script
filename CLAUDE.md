@@ -15,6 +15,8 @@ changes to that single-file shape unless asked otherwise.
   ntfy topic is read from `ntfy_topic.txt` next to `camera.py` (gitignored) —
   it acts as a shared secret, so never hardcode it or commit that file. If the
   file is missing or empty, notifications are skipped with one logged warning.
+  `python camera.py --generate-topic` creates a random topic and writes that
+  file (refuses to overwrite one unless `--force`).
 - External tool dependencies, all expected on `PATH`: `exiftool`, `ffmpeg`,
   `rclone`. Don't assume any of the three; check before adding calls that
   depend on a specific version's flags.

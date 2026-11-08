@@ -62,7 +62,10 @@ when the camera is plugged in.
   been created by this same rclone remote/client_id)
 - An [ntfy.sh](https://ntfy.sh/) topic for push notifications, stored as the
   only line of `ntfy_topic.txt` next to `camera.py` (gitignored); if the file
-  is missing or empty, notifications are skipped
+  is missing or empty, notifications are skipped.
+  Generate a secure one with `python camera.py --generate-topic` (add
+  `--force` to replace an existing topic), then subscribe to it in the ntfy
+  app.
 
 ## Task Scheduler setup
 
