@@ -1,7 +1,8 @@
 import shutil
 import subprocess
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
+import os
 import sys
 import time
 import win32file
@@ -43,13 +44,7 @@ def eject_drive(drive_letter: str):
         except RuntimeError as e:
             log(f"Failed to play success sound (non-fatal): {e}")
 
-        # ntfy
-        try:
-            requests.post("https://ntfy.sh/jowfuf-quPtid-suwza5",
-                data=f"Drive {drive_letter} ejected 😀".encode(encoding='utf-8'),
-                headers={"Connection": "close"})
-        except Exception as e:
-            log(f"Failed to send ntfy notification: {e}")
+        notify(f"Drive {drive_letter} ejected 😀")
 
     except pywintypes.error as e:
         print("Failed:", e)
@@ -58,16 +53,54 @@ def eject_drive(drive_letter: str):
         except RuntimeError as sound_e:
             log(f"Failed to play failure sound (non-fatal): {sound_e}")
 
-        try:
-            requests.post("https://ntfy.sh/jowfuf-quPtid-suwza5",
-                data=f"Failed to eject drive {drive_letter} 😞".encode(encoding='utf-8'),
-                headers={"Connection": "close"})
-        except Exception as e:
-            log(f"Failed to send ntfy notification: {e}")
+        notify(f"Failed to eject drive {drive_letter} 😞")
 
 def log(msg):
     """Print message with timestamp."""
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
+
+_ntfy_warned = False
+
+def notify(message: str, retries: int = 3) -> bool:
+    """Send an ntfy push notification. Never raises and never hangs: every
+    attempt has a timeout and failures are retried with a short backoff.
+    The topic comes from the NTFY_TOPIC environment variable (it acts as a
+    shared secret, so it must not live in the repo)."""
+    global _ntfy_warned
+    topic = os.environ.get("NTFY_TOPIC")
+    if not topic:
+        if not _ntfy_warned:
+            log("NTFY_TOPIC environment variable not set; skipping ntfy notifications.")
+            _ntfy_warned = True
+        return False
+    for attempt in range(1, retries + 1):
+        try:
+            resp = requests.post(
+                f"https://ntfy.sh/{topic}",
+                data=message.encode("utf-8"),
+                headers={"Connection": "close"},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            return True
+        except Exception as e:
+            log(f"ntfy attempt {attempt}/{retries} failed: {e}")
+            if attempt < retries:
+                time.sleep(2 * attempt)
+    return False
+
+def fat_wall_clock(mtime: float) -> datetime:
+    """Recover the true local wall-clock time from the mtime of a file on the
+    camera's FAT card.
+
+    FAT stores local time with no timezone, and Windows converts it to UTC
+    using the *current* DST offset rather than the one in effect on the file's
+    date. Python's fromtimestamp() then applies the file date's offset, so
+    summer-dated files read 1 hour late once DST has ended (and vice versa).
+    Adding back the current offset undoes exactly what Windows applied, so the
+    result is stable no matter when the script runs."""
+    utc = datetime.fromtimestamp(mtime, timezone.utc)
+    return (utc + datetime.now(TZ).utcoffset()).replace(tzinfo=None)
 
 def get_capture_dt(file_path: Path) -> datetime:
     """Return the file's capture time: EXIF DateTimeOriginal if available,
@@ -85,7 +118,7 @@ def get_capture_dt(file_path: Path) -> datetime:
         log(f"exiftool timestamp read failed for {file_path.name}: {e}")
 
     log(f"WARNING: no EXIF DateTimeOriginal for {file_path.name}, falling back to file mtime")
-    return datetime.fromtimestamp(file_path.stat().st_mtime)
+    return fat_wall_clock(file_path.stat().st_mtime)
 
 def canonical_name(file_path: Path) -> str:
     """Prefix the filename with its capture timestamp so a reused camera
@@ -152,30 +185,50 @@ for p in [inbox_path, upload_path, done_path]:
 # photos) and copy the genuinely new ones to inbox, renamed to be collision-proof.
 camera_files = {f.name: f for f in camera_path.iterdir() if f.is_file()}
 
-original_mtimes = {}
+# Index of everything already archived: size -> list of mtimes. copy2 preserves
+# both through the pipeline, so (size, mtime) is a stable content identity.
+originals_index = {}
+originals_count = 0
 for f in originals_path.iterdir():
     if f.is_file():
-        original_mtimes.setdefault(round(f.stat().st_mtime), []).append(f.name)
+        st = f.stat()
+        originals_index.setdefault(st.st_size, []).append(round(st.st_mtime))
+        originals_count += 1
+
+def already_archived(fpath: Path) -> bool:
+    """True if a file with the same size and capture time is already in
+    originals, regardless of its name. FAT mtimes read from the card shift by
+    exactly one hour across a DST change (see fat_wall_clock), while the
+    archived copies keep whatever value they had when imported -- so a
+    difference of 0 or exactly 3600 s counts as the same file. Requiring the
+    size to match as well keeps this safe from coincidental collisions."""
+    st = fpath.stat()
+    mt = round(st.st_mtime)
+    return any(abs(m - mt) in (0, 3600) for m in originals_index.get(st.st_size, ()))
 
 log(f"Found {len(camera_files)} files on camera.")
-log(f"Found {sum(len(v) for v in original_mtimes.values())} files in originals.")
+log(f"Found {originals_count} files in originals.")
+
+# Pick up anything an earlier interrupted run left behind. Those files are
+# already in originals, so the dedup check above would never see them again.
+resumed_inbox = sorted(f for f in inbox_path.iterdir() if f.is_file())
+resumed_upload = sorted(f for f in upload_path.iterdir() if f.is_file())
+if resumed_inbox or resumed_upload:
+    log(f"Resuming leftovers from an earlier run: {len(resumed_inbox)} in inbox, {len(resumed_upload)} in upload.")
 
 new_files = []
 
 for fname, fpath in camera_files.items():
-    file_mtime = round(fpath.stat().st_mtime)
-    if file_mtime in original_mtimes:
-        # Same capture time as something already imported -> genuine duplicate,
-        # regardless of what it's named this time around.
+    if already_archived(fpath):
         continue
 
     canon = canonical_name(fpath)
     dest_inbox = inbox_path / canon
     dest_original = originals_path / canon
     if dest_original.exists():
-        # Shouldn't happen (the mtime check above already ruled out a dup),
-        # but never silently overwrite an existing original.
-        log(f"WARNING: {canon} already exists in originals despite mtime check; skipping to avoid overwrite")
+        # Can happen for a file the (size, mtime) check missed; never silently
+        # overwrite an existing original.
+        log(f"WARNING: {canon} already exists in originals despite dedup check; skipping to avoid overwrite")
         continue
 
     shutil.copy2(fpath, dest_inbox)
@@ -187,16 +240,13 @@ for fname, fpath in camera_files.items():
 log("Safely removing camera...")
 eject_drive("E:")
 
-if not new_files:
+pending = resumed_inbox + new_files
+
+if not pending and not resumed_upload:
     log("No new files to process. Exiting script.")
-    try:
-        requests.post("https://ntfy.sh/jowfuf-quPtid-suwza5",
-            data="No new files to process. Exiting script. 😐".encode(encoding='utf-8'),
-            headers={"Connection": "close"})
-    except Exception as e:
-        log(f"Failed to send ntfy notification: {e}")
+    notify("No new files to process. Exiting script. 😐")
 else:
-    total_files = len(new_files)
+    total_files = len(pending)
     log(f"{total_files} new files to process.")
 
     # Step 3: Convert AVI videos to MP4 with the real capture time embedded.
@@ -205,7 +255,7 @@ else:
     # so uncoverted AVI uploads always get dated "today". The pristine AVI
     # stays archived untouched in `originals` -- only the inbox copy that
     # actually gets uploaded is converted.
-    avi_files = [f for f in new_files if f.suffix.upper() == ".AVI"]
+    avi_files = [f for f in pending if f.suffix.upper() == ".AVI"]
     if avi_files:
         log(f"Converting {len(avi_files)} AVI video(s) to MP4 with correct capture-time metadata...")
         for avi_path in avi_files:
@@ -239,7 +289,7 @@ else:
 
                 if result.returncode == 0 and mp4_path.exists():
                     avi_path.unlink()
-                    new_files[new_files.index(avi_path)] = mp4_path
+                    pending[pending.index(avi_path)] = mp4_path
                     log(f"Converted {avi_path.name} -> {mp4_path.name} (creation_time={creation_time}) {camera_icon}")
 
                     # Experimental: additionally write the Apple-style
@@ -271,27 +321,19 @@ else:
                 break
 
     # Step 4: ExifTool GPS removal (verbose)
-    jpg_files = [str(f) for f in inbox_path.glob("*.JPG")]
+    jpg_files = [str(f) for f in pending if f.suffix.upper() == ".JPG"]
     if jpg_files:
         log("Running ExifTool to remove GPS data (verbose)...")
 
         for file in jpg_files:
-            # Read DateTimeOriginal
-            result = subprocess.run(
-                ["exiftool", "-s", "-s", "-s", "-DateTimeOriginal", file],
-                capture_output=True,
-                text=True,
-            )
-
-            ts = result.stdout.strip()
-
-            log(f"DateTimeOriginal for {file}: {ts}")
-
-            if not ts:
-                raise ValueError(f"No DateTimeOriginal found for {file}")
-
-            # Parse EXIF timestamp
-            dt = datetime.strptime(ts, "%Y:%m:%d %H:%M:%S")
+            # Use the capture time already baked into the canonical filename
+            # (derived from EXIF) instead of re-reading it, so a missing tag
+            # can no longer abort the run after files were already archived.
+            try:
+                dt = capture_dt_from_canonical_name(Path(file))
+            except ValueError:
+                dt = get_capture_dt(Path(file))
+            log(f"Capture time for {file}: {dt}")
 
             # Attach timezone (this applies correct DST automatically)
             dt_local = dt.replace(tzinfo=TZ)
@@ -326,10 +368,10 @@ else:
                 log(f"ExifTool finished processing GPS data for {file}")
 
     # Step 5: Move files from inbox to upload folder with blinking flash
-    moved_files = []
+    moved_files = list(resumed_upload)
     log("Moving files to upload folder with blinking flash:")
 
-    for i, f in enumerate(new_files, start=1):
+    for i, f in enumerate(pending, start=1):
         dest_upload = upload_path / f.name
         shutil.move(str(f), dest_upload)
         moved_files.append(dest_upload)
@@ -338,38 +380,37 @@ else:
             print()
     print()
 
-    # Step 6: Upload files using Rclone with blinking flash
+    # Step 6: Upload files using Rclone with blinking flash. Each file moves to
+    # 'done' as soon as it uploads, so an interrupted run never re-uploads files
+    # that already made it, and the rest stay in 'upload' for the next run.
     uploaded_count = 0
+    done_count = 0
+    upload_failed = False
     if moved_files:
         log(f"Uploading {len(moved_files)} files to Google Photos via Rclone with blinking flash:")
 
         for f in moved_files:
             blink_flash()
             try:
-                process = subprocess.run(
+                subprocess.run(
                     ["rclone", "copy", str(f), "gphoto:album/vered_camera"], check=True,
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
                 )
-                uploaded_count += 1
-            except subprocess.CalledProcessError as e:
+            except (subprocess.CalledProcessError, FileNotFoundError) as e:
+                print()
                 log(f"Rclone upload failed for {f.name}: {e}")
-                try:
-                    requests.post("https://ntfy.sh/jowfuf-quPtid-suwza5",
-                        data=f"Rclone upload failed for {f.name} 😞\n{process.stdout}".encode(encoding='utf-8'),
-                        headers={"Connection": "close"})
-                except Exception as e2:
-                    log(f"Failed to send ntfy notification: {e2}")
+                output = (getattr(e, "stdout", None) or "")[-500:]
+                notify(f"Rclone upload failed for {f.name} 😞\n{output}")
+                upload_failed = True
                 break
-        if uploaded_count == len(moved_files):
-            log("Upload complete via Rclone.")
-
-                    # Step 7: Move uploaded files to 'done' folder
-            done_count = 0
-            for f in moved_files:
-                shutil.move(str(f), done_path / f.name)
-                done_count += 1
+            uploaded_count += 1
+            shutil.move(str(f), done_path / f.name)
+            done_count += 1
+        print()
+        if upload_failed:
+            log("Upload interrupted due to errors; remaining files stay in 'upload' and will be retried on the next run.")
         else:
-            log("Upload interrupted due to errors.")
+            log("Upload complete via Rclone.")
 
     # ASCII summary
     ascii_summary = r"""
@@ -380,17 +421,17 @@ else:
     | |    | |__| | |__| | |_| | |_| |  | |  
     |_|     \____/ \____/ \___/ \___/   |_|  
     """
-    print(ascii_summary)
+    if not upload_failed:
+        print(ascii_summary)
     log("==== Summary ====")
     log(f"Total files on camera: {len(camera_files)}")
     log(f"New files copied: {len(new_files)}")
+    if resumed_inbox or resumed_upload:
+        log(f"Resumed from an earlier run: {len(resumed_inbox) + len(resumed_upload)}")
     log(f"Files uploaded: {uploaded_count}")
     log(f"Files moved to done: {done_count}")
-    log("All new files processed and uploaded successfully! 🎉")
-    try:
-        requests.post("https://ntfy.sh/jowfuf-quPtid-suwza5",
-            data=f"Processed {len(new_files)} new files successfully! 🎉".encode(encoding='utf-8'),
-            headers={"Connection": "close"}
-            )
-    except Exception as e:
-        log(f"Failed to send ntfy notification: {e}")
+    if upload_failed:
+        log("Finished WITH ERRORS -- see above.")
+    else:
+        log("All new files processed and uploaded successfully! 🎉")
+        notify(f"Processed {uploaded_count} files successfully! 🎉")

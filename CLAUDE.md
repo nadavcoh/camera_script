@@ -11,18 +11,33 @@ changes to that single-file shape unless asked otherwise.
 - Hardcoded paths throughout (`E:\DCIM\100MEDIA`, `D:\Files\photos\vered\...`)
   — this is a personal single-user script, not meant to be generalized/
   parameterized unless explicitly asked.
+- Notifications go through `notify()` (timeout + retries, never raises). The
+  ntfy topic is read from the `NTFY_TOPIC` environment variable — it acts as a
+  shared secret, so never hardcode it in the repo. If unset, notifications
+  are skipped with one logged warning.
 - External tool dependencies, all expected on `PATH`: `exiftool`, `ffmpeg`,
   `rclone`. Don't assume any of the three; check before adding calls that
   depend on a specific version's flags.
 
 ## Design decisions worth knowing before changing dedup or upload logic
 
-**Dedup is by capture time (mtime), not filename.** The camera reuses
-filenames after an SD card swap/reset (confirmed: `SUNP0288.JPG` reused
-~7 months apart). `shutil.copy2` preserves mtime through every copy in the
-pipeline, so mtime doubles as a stable content-identity signal. Do not
-revert to filename-only comparison — it silently drops genuinely new photos
-whose name collides with an old archived one.
+**Dedup is by content identity (size + capture-time mtime), not filename.**
+The camera reuses filenames after an SD card swap/reset (confirmed:
+`SUNP0288.JPG` reused ~7 months apart). `shutil.copy2` preserves size and
+mtime through every copy in the pipeline, so `already_archived()` matches a
+camera file against `originals` on (size, mtime). Do not revert to
+filename-only comparison — it silently drops genuinely new photos whose name
+collides with an old archived one.
+
+**mtimes from the FAT card shift by exactly 1 hour across a DST change.**
+Windows converts FAT local time to UTC using the *current* DST offset, not
+the offset on the file's date. After Israel's DST ended (2026-10-25) every
+summer-dated file read 1 hour late, a pure-mtime check matched nothing, and
+~290 already-uploaded photos were re-imported and re-uploaded. Hence:
+`already_archived()` treats an mtime difference of exactly 0 or 3600 s as the
+same file (size must also match), and `fat_wall_clock()` undoes the quirk
+for the AVI timestamp fallback so canonical names stay stable no matter when
+the script runs. Don't compare raw mtimes without the size + 1 h tolerance.
 
 **Canonical filenames are `YYYYMMDD_HHMMSS_<original name>`**, derived from
 EXIF `DateTimeOriginal` (falling back to mtime with a logged warning if EXIF
@@ -73,6 +88,11 @@ the Samsung-proprietary `com.samsung.android.utc.offset` tag (real key,
 reverse-engineered from ExifTool's source, but not writable by any
 available tool without hand-authoring raw MP4 `moov/meta/keys` boxes —
 not attempted given the corruption risk and uncertain payoff).
+
+**Interrupted runs resume.** Files are moved to `done` one at a time right
+after their rclone upload succeeds. Anything left in `inbox`/`upload` by an
+earlier run is picked up at the start of the next one (those files are
+already in `originals`, so the dedup check would never see them again).
 
 ## Known-fragile areas / things to verify before "fixing"
 

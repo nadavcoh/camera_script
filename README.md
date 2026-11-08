@@ -8,11 +8,13 @@ when the camera is plugged in.
 ## What it does, in order
 
 1. **Detect new files** on the camera (`E:\DCIM\100MEDIA`) by comparing
-   capture time — not filename — against everything already archived in
-   `originals`. This matters because SD cards get swapped/reset and cameras
+   size and capture time — not filename — against everything already archived
+   in `originals`. This matters because SD cards get swapped/reset and cameras
    reuse filenames (e.g. `SUNP0288.JPG`); a plain name-based diff would
    silently skip a brand-new photo that happens to share a name with an old
-   one.
+   one. Capture times on the FAT card shift by exactly one hour across a DST
+   change, so a difference of 0 or 3600 s still counts as the same file.
+   Leftovers from an interrupted earlier run (`inbox`/`upload`) are resumed.
 2. **Copy new files** into `inbox` (working copy) and `originals` (permanent
    local archive, untouched forever) under a collision-proof name:
    `YYYYMMDD_HHMMSS_<originalname>`, using the EXIF `DateTimeOriginal` when
@@ -32,7 +34,8 @@ when the camera is plugged in.
 5. **Strip GPS data** from JPEGs and set the correct UTC offset tags
    (`exiftool`), so timestamps display correctly without leaking location.
 6. **Move to `upload`**, then **upload to Google Photos** via `rclone` into
-   the `vered_camera` album, then **move to `done`** on success.
+   the `vered_camera` album, moving each file to **`done`** as soon as it
+   uploads.
 7. **Send a push notification** via ntfy on completion, on "nothing to do",
    and on failure.
 
@@ -57,7 +60,9 @@ when the camera is plugged in.
   Google's March 2025 API changes mean an app can only list/manage albums
   and media items it created itself — the `vered_camera` album must have
   been created by this same rclone remote/client_id)
-- An [ntfy.sh](https://ntfy.sh/) topic for push notifications
+- An [ntfy.sh](https://ntfy.sh/) topic for push notifications, set in the
+  `NTFY_TOPIC` environment variable (e.g. `setx NTFY_TOPIC your-topic`); if
+  unset, notifications are skipped
 
 ## Task Scheduler setup
 
