@@ -2,7 +2,6 @@ import shutil
 import subprocess
 from pathlib import Path
 from datetime import datetime, timezone
-import os
 import sys
 import time
 import win32file
@@ -59,18 +58,23 @@ def log(msg):
     """Print message with timestamp."""
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
 
+NTFY_TOPIC_FILE = Path(__file__).resolve().parent / "ntfy_topic.txt"
 _ntfy_warned = False
 
 def notify(message: str, retries: int = 3) -> bool:
     """Send an ntfy push notification. Never raises and never hangs: every
     attempt has a timeout and failures are retried with a short backoff.
-    The topic comes from the NTFY_TOPIC environment variable (it acts as a
-    shared secret, so it must not live in the repo)."""
+    The topic is read from ntfy_topic.txt next to this script (it acts as a
+    shared secret, so the file is gitignored and must not live in the repo)."""
     global _ntfy_warned
-    topic = os.environ.get("NTFY_TOPIC")
+    try:
+        # utf-8-sig so a BOM from Windows Notepad doesn't end up in the URL
+        topic = NTFY_TOPIC_FILE.read_text(encoding="utf-8-sig").strip()
+    except OSError:
+        topic = ""
     if not topic:
         if not _ntfy_warned:
-            log("NTFY_TOPIC environment variable not set; skipping ntfy notifications.")
+            log(f"No ntfy topic found in {NTFY_TOPIC_FILE}; skipping ntfy notifications.")
             _ntfy_warned = True
         return False
     for attempt in range(1, retries + 1):

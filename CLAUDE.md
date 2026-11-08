@@ -12,9 +12,9 @@ changes to that single-file shape unless asked otherwise.
   — this is a personal single-user script, not meant to be generalized/
   parameterized unless explicitly asked.
 - Notifications go through `notify()` (timeout + retries, never raises). The
-  ntfy topic is read from the `NTFY_TOPIC` environment variable — it acts as a
-  shared secret, so never hardcode it in the repo. If unset, notifications
-  are skipped with one logged warning.
+  ntfy topic is read from `ntfy_topic.txt` next to `camera.py` (gitignored) —
+  it acts as a shared secret, so never hardcode it or commit that file. If the
+  file is missing or empty, notifications are skipped with one logged warning.
 - External tool dependencies, all expected on `PATH`: `exiftool`, `ffmpeg`,
   `rclone`. Don't assume any of the three; check before adding calls that
   depend on a specific version's flags.

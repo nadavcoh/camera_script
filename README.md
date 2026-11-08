@@ -60,9 +60,9 @@ when the camera is plugged in.
   Google's March 2025 API changes mean an app can only list/manage albums
   and media items it created itself — the `vered_camera` album must have
   been created by this same rclone remote/client_id)
-- An [ntfy.sh](https://ntfy.sh/) topic for push notifications, set in the
-  `NTFY_TOPIC` environment variable (e.g. `setx NTFY_TOPIC your-topic`); if
-  unset, notifications are skipped
+- An [ntfy.sh](https://ntfy.sh/) topic for push notifications, stored as the
+  only line of `ntfy_topic.txt` next to `camera.py` (gitignored); if the file
+  is missing or empty, notifications are skipped
 
 ## Task Scheduler setup
 
