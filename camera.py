@@ -203,7 +203,7 @@ if args.generate_topic:
 print(ascii_banner)
 
 # Paths
-camera_path = Path(r"f:\DCIM\100MEDIA")
+camera_path = Path(r"h:\DCIM\100MEDIA")
 originals_path = Path(r"D:\media\photos\vered\originals")
 inbox_path = Path(r"D:\media\photos\vered\inbox")
 upload_path = Path(r"D:\media\photos\vered\upload")
