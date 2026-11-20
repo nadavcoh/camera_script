@@ -40,7 +40,8 @@ when the camera is plugged in.
    the `vered_camera` album, 50 files per `rclone` run with parallel
    transfers, moving each chunk to **`done`** once rclone reports success.
 7. **Send a push notification** via ntfy on completion, on "nothing to do",
-   and on failure.
+   and on failure (upload errors, or photos held back because GPS removal
+   failed).
 
 ## Folder layout
 
@@ -87,6 +88,14 @@ Triggered on camera-arrival (StorSvc device event). Two things to watch:
 
 ## Known limitations / things to keep an eye on
 
+- The chunked upload (50 files per `rclone` run, parallel transfers) replaced a
+  one-`rclone`-process-per-photo loop that took ~26 s per photo. The speedup
+  hasn't been measured against real Google Photos yet; if an upload run is
+  still slow, or `rclone` rejects `--gphotos-batch-size`, see the upload notes
+  in `CLAUDE.md`. A failed chunk stays in `upload` and is retried next run.
+- A photo that can't have its GPS data removed is never uploaded; it waits in
+  `inbox` until a later run succeeds. Check the log/ntfy alert if the same
+  file keeps being held back (e.g. `exiftool` missing from `PATH`).
 - If `ffmpeg` isn't installed or isn't on `PATH`, AVI files upload
   unconverted (and will show the upload date in Google Photos rather than
   the real capture date) — the script logs this clearly instead of failing.
