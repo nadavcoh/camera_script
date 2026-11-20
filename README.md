@@ -7,7 +7,8 @@ when the camera is plugged in.
 
 ## What it does, in order
 
-1. **Detect new files** on the camera (`E:\DCIM\100MEDIA`) by comparing
+1. **Detect new files** on the camera (`H:\DCIM\100MEDIA`; the drive letter is
+   the `CAMERA_DRIVE` constant, also used for the eject) by comparing
    size and capture time — not filename — against everything already archived
    in `originals`. This matters because SD cards get swapped/reset and cameras
    reuse filenames (e.g. `SUNP0288.JPG`); a plain name-based diff would
@@ -33,9 +34,11 @@ when the camera is plugged in.
 4. **Eject the camera** safely (Windows volume lock/dismount/eject).
 5. **Strip GPS data** from JPEGs and set the correct UTC offset tags
    (`exiftool`), so timestamps display correctly without leaking location.
+   A photo whose GPS removal fails is held back in `inbox` (never uploaded)
+   and retried on the next run.
 6. **Move to `upload`**, then **upload to Google Photos** via `rclone` into
-   the `vered_camera` album, moving each file to **`done`** as soon as it
-   uploads.
+   the `vered_camera` album, 50 files per `rclone` run with parallel
+   transfers, moving each chunk to **`done`** once rclone reports success.
 7. **Send a push notification** via ntfy on completion, on "nothing to do",
    and on failure.
 
@@ -43,11 +46,11 @@ when the camera is plugged in.
 
 | Path | Purpose |
 |---|---|
-| `E:\DCIM\100MEDIA` | Camera's memory card (source, read-only in practice) |
-| `D:\Files\photos\vered\originals` | Permanent local archive — never modified after write |
-| `D:\Files\photos\vered\inbox` | Working copy, being processed |
-| `D:\Files\photos\vered\upload` | Ready to upload |
-| `D:\Files\photos\vered\done` | Successfully uploaded |
+| `H:\DCIM\100MEDIA` | Camera's memory card (source, read-only in practice) |
+| `D:\media\photos\vered\originals` | Permanent local archive — never modified after write |
+| `D:\media\photos\vered\inbox` | Working copy, being processed |
+| `D:\media\photos\vered\upload` | Ready to upload |
+| `D:\media\photos\vered\done` | Successfully uploaded |
 
 ## Dependencies
 

@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 from datetime import datetime, timezone
 import sys
+import tempfile
 import time
 import win32file
 import winioctlcon
@@ -14,6 +15,16 @@ import requests
 from zoneinfo import ZoneInfo
 
 TZ = ZoneInfo("Asia/Jerusalem")
+
+# Single source of truth for the camera's drive letter: the same value is used
+# to read the card AND to eject it, so the two can never point at different drives.
+CAMERA_DRIVE = "H:"
+
+# Upload tuning. One rclone process uploads a whole chunk concurrently, so the
+# Google Photos backend can commit its upload batches in parallel instead of
+# idling for a batch timeout after every single file.
+UPLOAD_CHUNK_SIZE = 50   # files per rclone run (Google Photos batch max is 50)
+UPLOAD_TRANSFERS = 8     # parallel uploads inside one rclone run
 
 def eject_drive(drive_letter: str):
     volume_path = f"\\\\.\\{drive_letter}"
@@ -179,6 +190,33 @@ def blink_flash():
     sys.stdout.write("\b" + camera_icon)
     sys.stdout.flush()
 
+def upload_chunk(files, dest="gphoto:album/vered_camera"):
+    """Upload a list of files from the upload folder with ONE rclone run.
+    Raises CalledProcessError/FileNotFoundError on failure; on success every
+    file in the chunk is uploaded. rclone's Google Photos "unchanged, skipping"
+    check is filename based, and our canonical names are unique, so re-running a
+    partly uploaded chunk after a failure never duplicates photos."""
+    list_path = None
+    try:
+        # --files-from-raw takes names verbatim (no globbing / comment handling).
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as lf:
+            list_path = lf.name
+            for f in files:
+                lf.write(f.name + "\n")
+        return subprocess.run(
+            ["rclone", "copy", str(upload_path), dest,
+             "--files-from-raw", list_path,
+             "--transfers", str(UPLOAD_TRANSFERS),
+             "--gphotos-batch-size", str(UPLOAD_TRANSFERS)],
+            check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+    finally:
+        if list_path:
+            try:
+                Path(list_path).unlink()
+            except OSError:
+                pass
+
 # NFO-style camera with flash ASCII banner
 ascii_banner = r"""
          .-~~~~~~~~~-._       _.-~~~~~~~~~-.
@@ -203,7 +241,7 @@ if args.generate_topic:
 print(ascii_banner)
 
 # Paths
-camera_path = Path(r"h:\DCIM\100MEDIA")
+camera_path = Path(CAMERA_DRIVE + "\\DCIM\\100MEDIA")
 originals_path = Path(r"D:\media\photos\vered\originals")
 inbox_path = Path(r"D:\media\photos\vered\inbox")
 upload_path = Path(r"D:\media\photos\vered\upload")
@@ -274,7 +312,7 @@ for fname, fpath in camera_files.items():
 
 # Sefely remove camera
 log("Safely removing camera...")
-eject_drive("E:")
+eject_drive(CAMERA_DRIVE)
 
 pending = resumed_inbox + new_files
 
@@ -356,19 +394,23 @@ else:
                 log(f"ffmpeg not found on PATH; skipping conversion for {avi_path.name}. Its date in Google Photos will show the upload time.")
                 break
 
-    # Step 4: ExifTool GPS removal (verbose)
-    jpg_files = [str(f) for f in pending if f.suffix.upper() == ".JPG"]
+    # Step 4: ExifTool GPS removal (verbose). A file whose GPS strip fails is
+    # HELD BACK in inbox (never uploaded with its location data); the next run
+    # picks it up again from inbox and retries.
+    gps_held = []
+    jpg_files = [f for f in pending if f.suffix.upper() == ".JPG"]
     if jpg_files:
         log("Running ExifTool to remove GPS data (verbose)...")
 
-        for file in jpg_files:
+        for idx, jpg in enumerate(jpg_files):
+            file = str(jpg)
             # Use the capture time already baked into the canonical filename
             # (derived from EXIF) instead of re-reading it, so a missing tag
             # can no longer abort the run after files were already archived.
             try:
-                dt = capture_dt_from_canonical_name(Path(file))
+                dt = capture_dt_from_canonical_name(jpg)
             except ValueError:
-                dt = get_capture_dt(Path(file))
+                dt = get_capture_dt(jpg)
             log(f"Capture time for {file}: {dt}")
 
             # Attach timezone (this applies correct DST automatically)
@@ -380,28 +422,43 @@ else:
 
             log(f"Setting OffsetTime for {file} to {offset}")
 
-            process = subprocess.Popen(
-                [
-                    "exiftool", 
-                    "-v", 
-                    "-gps:all=", 
-                    "-overwrite_original",
-                    f"-OffsetTime={offset}",
-                    f"-OffsetTimeOriginal={offset}",
-                    f"-OffsetTimeDigitized={offset}",
-                    file,
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True
-            )
+            try:
+                process = subprocess.Popen(
+                    [
+                        "exiftool",
+                        "-v",
+                        "-gps:all=",
+                        "-overwrite_original",
+                        f"-OffsetTime={offset}",
+                        f"-OffsetTimeOriginal={offset}",
+                        f"-OffsetTimeDigitized={offset}",
+                        file,
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True
+                )
+            except FileNotFoundError:
+                # No exiftool at all: nothing can be stripped, so hold every
+                # remaining JPEG back rather than upload it with GPS data.
+                log("exiftool not found on PATH; holding back all remaining JPEGs (no GPS removal possible).")
+                gps_held.extend(jpg_files[idx:])
+                break
             for line in process.stdout:
                 print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {line}", end='')
             process.wait()
             if process.returncode != 0:
-                log(f"ExifTool exited with code {process.returncode}")
+                log(f"ExifTool exited with code {process.returncode}; holding {jpg.name} back from upload.")
+                gps_held.append(jpg)
             else:
                 log(f"ExifTool finished processing GPS data for {file}")
+
+    if gps_held:
+        held_names = {f.name for f in gps_held}
+        pending = [f for f in pending if f.name not in held_names]
+        log(f"WARNING: {len(gps_held)} JPEG(s) held back in inbox because GPS removal failed; they will be retried next run.")
+        notify(f"GPS removal failed for {len(gps_held)} photo(s); held back from upload 😞")
+    total_files = len(pending)
 
     # Step 5: Move files from inbox to upload folder with blinking flash
     moved_files = list(resumed_upload)
@@ -416,32 +473,34 @@ else:
             print()
     print()
 
-    # Step 6: Upload files using Rclone with blinking flash. Each file moves to
-    # 'done' as soon as it uploads, so an interrupted run never re-uploads files
-    # that already made it, and the rest stay in 'upload' for the next run.
+    # Step 6: Upload with Rclone, UPLOAD_CHUNK_SIZE files per rclone run. A
+    # chunk's files move to 'done' only after rclone exits 0 for that chunk, so
+    # an interrupted run never loses track of anything: files of a failed chunk
+    # stay in 'upload' and are retried (already-uploaded names are skipped by
+    # rclone) on the next run.
     uploaded_count = 0
     done_count = 0
     upload_failed = False
     if moved_files:
-        log(f"Uploading {len(moved_files)} files to Google Photos via Rclone with blinking flash:")
+        log(f"Uploading {len(moved_files)} files to Google Photos via Rclone in chunks of {UPLOAD_CHUNK_SIZE}:")
 
-        for f in moved_files:
+        for start in range(0, len(moved_files), UPLOAD_CHUNK_SIZE):
+            chunk = moved_files[start:start + UPLOAD_CHUNK_SIZE]
             blink_flash()
+            log(f"Uploading files {start + 1}-{start + len(chunk)} of {len(moved_files)}...")
             try:
-                subprocess.run(
-                    ["rclone", "copy", str(f), "gphoto:album/vered_camera"], check=True,
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
-                )
+                upload_chunk(chunk)
             except (subprocess.CalledProcessError, FileNotFoundError) as e:
                 print()
-                log(f"Rclone upload failed for {f.name}: {e}")
+                log(f"Rclone upload failed for chunk starting with {chunk[0].name}: {e}")
                 output = (getattr(e, "stdout", None) or "")[-500:]
-                notify(f"Rclone upload failed for {f.name} 😞\n{output}")
+                notify(f"Rclone upload failed ({chunk[0].name} and {len(chunk) - 1} more) 😞\n{output}")
                 upload_failed = True
                 break
-            uploaded_count += 1
-            shutil.move(str(f), done_path / f.name)
-            done_count += 1
+            uploaded_count += len(chunk)
+            for f in chunk:
+                shutil.move(str(f), done_path / f.name)
+                done_count += 1
         print()
         if upload_failed:
             log("Upload interrupted due to errors; remaining files stay in 'upload' and will be retried on the next run.")
@@ -457,7 +516,7 @@ else:
     | |    | |__| | |__| | |_| | |_| |  | |  
     |_|     \____/ \____/ \___/ \___/   |_|  
     """
-    if not upload_failed:
+    if not upload_failed and not gps_held:
         print(ascii_summary)
     log("==== Summary ====")
     log(f"Total files on camera: {len(camera_files)}")
@@ -466,7 +525,9 @@ else:
         log(f"Resumed from an earlier run: {len(resumed_inbox) + len(resumed_upload)}")
     log(f"Files uploaded: {uploaded_count}")
     log(f"Files moved to done: {done_count}")
-    if upload_failed:
+    if gps_held:
+        log(f"Held back (GPS removal failed): {len(gps_held)}")
+    if upload_failed or gps_held:
         log("Finished WITH ERRORS -- see above.")
     else:
         log("All new files processed and uploaded successfully! 🎉")

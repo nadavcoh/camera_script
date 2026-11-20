@@ -8,9 +8,14 @@ changes to that single-file shape unless asked otherwise.
 
 - Runs on Windows only (`win32file`, `winioctlcon`, `winsound`), triggered by
   Task Scheduler on a StorSvc device-arrival event.
-- Hardcoded paths throughout (`E:\DCIM\100MEDIA`, `D:\Files\photos\vered\...`)
+- Hardcoded paths throughout (`H:\DCIM\100MEDIA`, `D:\media\photos\vered\...`)
   — this is a personal single-user script, not meant to be generalized/
   parameterized unless explicitly asked.
+- **The camera's drive letter lives in one constant, `CAMERA_DRIVE`** (top of
+  `camera.py`). It is used both to build the source path and to eject the
+  volume. Previously the path (`h:`) and the eject call (`"E:"`) were separate
+  literals that could silently disagree, ejecting the wrong drive. Never
+  reintroduce a second literal for the drive letter.
 - Notifications go through `notify()` (timeout + retries, never raises). The
   ntfy topic is read from `ntfy_topic.txt` next to `camera.py` (gitignored) —
   it acts as a shared secret, so never hardcode it or commit that file. If the
@@ -91,10 +96,34 @@ reverse-engineered from ExifTool's source, but not writable by any
 available tool without hand-authoring raw MP4 `moov/meta/keys` boxes —
 not attempted given the corruption risk and uncertain payoff).
 
-**Interrupted runs resume.** Files are moved to `done` one at a time right
-after their rclone upload succeeds. Anything left in `inbox`/`upload` by an
-earlier run is picked up at the start of the next one (those files are
-already in `originals`, so the dedup check would never see them again).
+**Interrupted runs resume.** Files are moved to `done` right after the rclone
+run that uploaded them succeeds (per chunk, see below). Anything left in
+`inbox`/`upload` by an earlier run is picked up at the start of the next one
+(those files are already in `originals`, so the dedup check would never see
+them again).
+
+**GPS removal failures hold the file back; they never upload it.** If
+`exiftool` exits non-zero for a JPEG (or isn't on `PATH`), that file stays in
+`inbox`, is dropped from `pending` so it never reaches `upload`, an ntfy alert
+is sent, and the run ends with "Finished WITH ERRORS". The next run retries it
+via the resume path above. Don't change this to log-and-continue: that would
+upload a photo with its location data.
+
+**Uploads run in chunks, one rclone process per chunk** (`upload_chunk()`,
+`UPLOAD_CHUNK_SIZE` = 50, `UPLOAD_TRANSFERS` = 8, files listed with
+`--files-from-raw`). The old one-`rclone copy`-per-file loop took ~26 s per
+photo (83 photos = 36 min). The likely cause is the Google Photos backend's
+batch commit: each single-file process pays the commit/idle wait on its own,
+whereas concurrent uploads inside one process share a batch
+(`--gphotos-batch-size` is set equal to `--transfers` so batches fill and commit
+immediately). A chunk's files move to `done` only after rclone exits 0 for the
+whole chunk. If a chunk fails, its files stay in `upload` and the whole chunk is
+retried next run; that is safe because rclone skips names that already exist in
+the album and our canonical names are unique. This is untested against the
+real Google Photos API: after the first real run, compare the upload time and
+check `rclone lsd gphoto:album` for duplicates; if rclone rejects a flag it
+fails loudly (non-zero exit), never silently. Tune `UPLOAD_TRANSFERS` down if
+Google returns 429s.
 
 ## Known-fragile areas / things to verify before "fixing"
 
