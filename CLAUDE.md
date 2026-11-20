@@ -14,8 +14,10 @@ changes to that single-file shape unless asked otherwise.
 - **The camera's drive letter lives in one constant, `CAMERA_DRIVE`** (top of
   `camera.py`). It is used both to build the source path and to eject the
   volume. Previously the path (`h:`) and the eject call (`"E:"`) were separate
-  literals that could silently disagree, ejecting the wrong drive. Never
-  reintroduce a second literal for the drive letter.
+  literals that could silently disagree, so the eject targeted a different
+  drive than the one the photos were read from. Never reintroduce a second
+  literal for the drive letter. The camera is `H:`; if it ever mounts as a
+  different letter, change only `CAMERA_DRIVE`.
 - Notifications go through `notify()` (timeout + retries, never raises). The
   ntfy topic is read from `ntfy_topic.txt` next to `camera.py` (gitignored) —
   it acts as a shared secret, so never hardcode it or commit that file. If the
@@ -105,8 +107,9 @@ them again).
 **GPS removal failures hold the file back; they never upload it.** If
 `exiftool` exits non-zero for a JPEG (or isn't on `PATH`), that file stays in
 `inbox`, is dropped from `pending` so it never reaches `upload`, an ntfy alert
-is sent, and the run ends with "Finished WITH ERRORS". The next run retries it
-via the resume path above. Don't change this to log-and-continue: that would
+is sent, and the run ends with "Finished WITH ERRORS" (the other photos in the
+run are still uploaded normally). The next run retries it via the resume path
+above. Don't change this to log-and-continue: that would
 upload a photo with its location data.
 
 **Uploads run in chunks, one rclone process per chunk** (`upload_chunk()`,
@@ -150,12 +153,20 @@ Google returns 429s.
 
 ## Testing notes
 
-There's no test suite (single-user Windows automation script talking to
-physical hardware, an OS-level volume API, and live cloud services — not
-practical to unit test meaningfully). Verify changes by:
+There's no test suite in the repo (single-user Windows automation script
+talking to physical hardware, an OS-level volume API, and live cloud services —
+not practical to unit test meaningfully). Verify changes by:
 - `python -m py_compile camera.py` for a fast syntax check (this sandbox
   can't import `win32file`/`winsound`, so that's the ceiling of local
   verification here — real behavior needs testing on the actual Windows
   machine).
 - Reasoning through the dedup/rename logic against the actual `originals`
   folder contents rather than assuming.
+- For the GPS hold-back and chunked-upload paths, a throwaway Linux harness
+  works well: stub `win32file`/`winioctlcon`/`pywintypes`/`winsound`/`requests`
+  as tiny modules on `PYTHONPATH`, put fake `exiftool` and `rclone` shell
+  scripts first on `PATH` (the fake `exiftool` exits 1 for a chosen filename,
+  the fake `rclone` logs its args and `--files-from-raw` list), `sed` the
+  hardcoded paths in a *copy* of `camera.py` to temp dirs, and run the copy
+  twice to confirm a held-back file is retried on the second run. This proves
+  the control flow only, not real rclone/Google Photos behavior.
